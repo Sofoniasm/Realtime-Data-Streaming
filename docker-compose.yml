@@ -1,4 +1,4 @@
-version: '3'
+version: '3.8'
 
 services:
   zookeeper:
@@ -103,6 +103,118 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    ports:
+      - '9042:9042'
+    volumes:
+      - ./cassandra:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD', 'bash', '-c', "cqlsh -e 'describe keyspaces' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    networks:
+      - confluent
+
+  cassandra-init:
+    image: cassandra:4.1
+    container_name: cassandra-init
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./cassandra:/opt/cassandra-init:ro
+    entrypoint: ["/bin/bash", "/opt/cassandra-init/init_cassandra.sh"]
+    networks:
+      - confluent
+
+  spark-master:
+    build: ./spark
+    container_name: spark-master
+    environment:
+      SPARK_MODE: master
+      SPARK_MASTER_HOST: spark-master
+      PYSPARK_PYTHON: /opt/bitnami/python/bin/python3
+    ports:
+      - '7077:7077'
+      - '8080:8080'
+    networks:
+      - confluent
+
+  spark-worker:
+    build: ./spark
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      PYSPARK_PYTHON: /opt/bitnami/python/bin/python3
+    ports:
+      - '8083:8081'
+    networks:
+      - confluent
+
+  spark-job:
+    build: ./spark
+    container_name: spark-job
+    depends_on:
+      - broker
+      - spark-master
+      - cassandra
+    volumes:
+      - ./spark:/opt/app
+    command: ["/bin/bash", "/opt/app/launch_and_run.sh"]
+    environment:
+      PYSPARK_PYTHON: /opt/bitnami/python/bin/python3
+      PYSPARK_DRIVER_PYTHON: /opt/bitnami/python/bin/python3
+      HADOOP_USER_NAME: spark
+      JAVA_TOOL_OPTIONS: -Duser.name=spark -Duser.home=/tmp
+    networks:
+      - confluent
+
+  airflow:
+    image: apache/airflow:2.6.3
+    container_name: airflow
+    command: ["bash", "-lc", "airflow standalone"]
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    volumes:
+      - ./dags:/opt/airflow/dags
+    ports:
+      - '8082:8080'
+    depends_on:
+      - broker
+    networks:
+      - confluent
+
+  producer:
+    image: python:3.11-slim
+    container_name: producer
+    volumes:
+      - ./:/opt/app
+    working_dir: /opt/app
+    command: ["bash", "-lc", "pip install --no-cache-dir kafka-python requests && python producer/producer.py"]
+    depends_on:
+      - broker
+    networks:
+      - confluent
+
+  tester:
+    image: python:3.11-slim
+    container_name: tester
+    depends_on:
+      - broker
+      - cassandra
+    volumes:
+      - ./:/opt/app
+    working_dir: /opt/app
+    entrypoint: ["/bin/bash", "/opt/app/scripts/verify_end_to_end.sh"]
+    networks:
+      - confluent
 
 networks:
   confluent:
